@@ -13,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from x402.fastapi.middleware import require_payment
 from x402.types import HTTPInputSchema, PaywallConfig
 
 from src.config import settings
@@ -26,6 +25,7 @@ from src.models import (
     OracleResult,
 )
 from src.workers import process_oracle_query
+from src.x402_custom_middleware import require_payment_async_settle
 
 logger = logging.getLogger(__name__)
 
@@ -252,8 +252,31 @@ if not settings.debug_payments:
             )
             logger.info("✓ CDP facilitator configured for production payment verification")
 
+    # Settlement callbacks for async payment processing
+    async def on_settlement_success(request: Request, payment, payment_requirements):
+        """Handle successful payment settlement - queue the job for processing."""
+        if hasattr(request.state, "job_id") and hasattr(request.state, "query"):
+            job_id = request.state.job_id
+            query = request.state.query
+            logger.info(f"Settlement succeeded - queueing job {job_id} for processing")
+
+            # Enqueue task for background processing
+            process_oracle_query(job_id, query)
+
+    async def on_settlement_failure(
+        request: Request, payment, payment_requirements, error_reason: str
+    ):
+        """Handle failed payment settlement - mark the job as failed."""
+        if hasattr(request.state, "job_id"):
+            job_id = request.state.job_id
+            logger.warning(f"Settlement failed for job {job_id}: {error_reason}")
+
+            # Mark the job as failed with settlement error
+            job_store.update_job_error(job_id, "Payment settlement failed")
+
     # Wrap payment middleware to skip OPTIONS requests for CORS.
-    payment_middleware = require_payment(
+    # Using custom async-settle middleware to avoid proxy idle timeout issues
+    payment_middleware = require_payment_async_settle(
         path="/api/v1/query",
         price=settings.x402_price,
         pay_to_address=settings.x402_payment_address,
@@ -279,11 +302,13 @@ if not settings.debug_payments:
         ),
         output_schema=JobResponse.model_json_schema(),
         facilitator_config=facilitator_config,
+        on_settlement_success=on_settlement_success,
+        on_settlement_failure=on_settlement_failure,
     )
 
     @app.middleware("http")
     async def payment_with_cors(request: Request, call_next):
-        """Payment middleware that skips OPTIONS requests for CORS preflight and handles deferred job creation."""
+        """Payment middleware that skips OPTIONS requests for CORS preflight."""
         if request.method == "OPTIONS":
             return await call_next(request)
 
@@ -299,27 +324,8 @@ if not settings.debug_payments:
                 response.headers["Access-Control-Allow-Methods"] = "*"
                 response.headers["Access-Control-Allow-Headers"] = "*"
 
-        # If payment settled successfully and there's a pending job creation, create it now.
-        # This ensures jobs are only created AFTER payment settlement succeeds.
-        if response.status_code >= 200 and response.status_code < 300:
-            if hasattr(request.state, "pending_job_creation"):
-                job_params = request.state.pending_job_creation
-                logger.info(
-                    f"Creating job {job_params['job_id']} after successful payment settlement"
-                )
-
-                # Create the job in the database with the pre-generated ID and timestamp.
-                job_store.create_job_with_id(
-                    job_id=job_params["job_id"],
-                    query=job_params["query"],
-                    payer_address=job_params["payer_address"],
-                    tx_hash=job_params["tx_hash"],
-                    network=job_params["network"],
-                    created_at=job_params["created_at"],
-                )
-
-                # Enqueue task for background processing.
-                process_oracle_query(job_params["job_id"], job_params["query"])
+        # Note: Job creation now happens asynchronously via settlement callbacks
+        # to avoid blocking the response for proxy idle timeout
 
         return response
 
@@ -400,33 +406,21 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
         # If payment info extraction fails, continue without it.
         logger.warning(f"Failed to extract payment info: {e}", exc_info=True)
 
-    # If payment is required, defer job creation until after settlement.
-    # This prevents creating jobs when settlement fails.
-    if not settings.debug_payments:
-        # Generate job_id and timestamp now for the response.
-        import uuid
+    # Create job immediately after payment verification.
+    # Settlement will happen asynchronously in the background.
+    job_id, created_at = job_store.create_job(
+        query.query,
+        payer_address=payer_address,
+        tx_hash=tx_hash,
+        network=network,
+    )
 
-        job_id = str(uuid.uuid4())
-        created_at = datetime.now(UTC)
+    # Store job_id and query in request state so settlement callbacks can access them.
+    request.state.job_id = job_id
+    request.state.query = query.query
 
-        # Store job creation parameters in request state for middleware to process after settlement.
-        request.state.pending_job_creation = {
-            "job_id": job_id,
-            "query": query.query,
-            "payer_address": payer_address,
-            "tx_hash": tx_hash,
-            "network": network,
-            "created_at": created_at,
-        }
-    else:
-        # In debug mode, create job immediately (no payment required).
-        job_id, created_at = job_store.create_job(
-            query.query,
-            payer_address=payer_address,
-            tx_hash=tx_hash,
-            network=network,
-        )
-        # Enqueue task for background processing.
+    # In debug mode, queue job immediately since there's no settlement to wait for.
+    if settings.debug_payments:
         process_oracle_query(job_id, query.query)
 
     return JobResponse(

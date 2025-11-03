@@ -364,12 +364,12 @@ class JobStore:
             limit: Number of recent jobs to analyze (default: 10)
 
         Returns:
-            Dict with 'total' and 'failed' counts
+            Dict with 'total' and 'failed' counts (excludes payment settlement failures)
         """
         with self._cursor(row_factory=sqlite3.Row) as cursor:
             cursor.execute(
                 """
-                SELECT status
+                SELECT status, error
                 FROM jobs
                 WHERE status IN (?, ?)
                 ORDER BY completed_at DESC
@@ -381,7 +381,13 @@ class JobStore:
             rows = cursor.fetchall()
 
         total = len(rows)
-        failed = sum(1 for row in rows if row["status"] == JobStatus.FAILED.value)
+        # Only count failures that are NOT payment settlement failures
+        failed = sum(
+            1
+            for row in rows
+            if row["status"] == JobStatus.FAILED.value
+            and (row["error"] is None or not row["error"].startswith("Payment settlement failed"))
+        )
 
         return {"total": total, "failed": failed}
 

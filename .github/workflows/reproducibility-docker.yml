@@ -23,6 +23,11 @@ jobs:
         with:
           ref: ${{ env.DOCKER_GIT_REF }}
 
+      - name: Show commit info
+        run: |
+          echo "Building from commit: $(git rev-parse HEAD)"
+          echo "Commit message: $(git log -1 --pretty=%B)"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

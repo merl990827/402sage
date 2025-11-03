@@ -7,9 +7,11 @@ test-unit:
 test-e2e:
 	@echo "Running E2E tests..."
 	@echo "Preparing compose file for local testing..."
-	@# Create temporary compose file without SHA256 digests to use locally built image
+	@# Create temporary compose file without SHA256 digests and use testing tag
 	@TMP_COMPOSE=$$(mktemp); \
-		sed 's/@sha256:[a-f0-9]\{64\}//g' compose.yaml > "$$TMP_COMPOSE"; \
+		sed -e 's/@sha256:[a-f0-9]\{64\}//g' \
+		    -e 's|ghcr.io/ptrusr/verisage.xyz:latest|ghcr.io/ptrusr/verisage.xyz:testing|g' \
+		    compose.yaml > "$$TMP_COMPOSE"; \
 		COMPOSE_FILE="$$TMP_COMPOSE" bash -c 'cd tests/e2e && ./test-e2e.sh'; \
 		TEST_EXIT=$$?; \
 		rm -f "$$TMP_COMPOSE"; \
@@ -18,9 +20,11 @@ test-e2e:
 test-e2e-payments:
 	@echo "Running E2E payment tests..."
 	@echo "Preparing compose file for local testing..."
-	@# Create temporary compose file without SHA256 digests to use locally built image
+	@# Create temporary compose file without SHA256 digests and use testing tag
 	@TMP_COMPOSE=$$(mktemp); \
-		sed 's/@sha256:[a-f0-9]\{64\}//g' compose.yaml > "$$TMP_COMPOSE"; \
+		sed -e 's/@sha256:[a-f0-9]\{64\}//g' \
+		    -e 's|ghcr.io/ptrusr/verisage.xyz:latest|ghcr.io/ptrusr/verisage.xyz:testing|g' \
+		    compose.yaml > "$$TMP_COMPOSE"; \
 		COMPOSE_FILE="$$TMP_COMPOSE" bash -c 'cd tests/e2e && ./test-e2e-payments.sh'; \
 		TEST_EXIT=$$?; \
 		rm -f "$$TMP_COMPOSE"; \

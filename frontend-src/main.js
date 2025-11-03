@@ -278,8 +278,8 @@ async function pollForResults(jobId) {
 
       // Update loading message based on status.
       const statusMessages = {
-        pending: 'Queuing your request...',
-        processing: 'Analyzing responses from AI providers...',
+        pending: 'Confirming payment settlement...',
+        processing: 'Querying AI providers and analyzing responses...',
       };
       loadingMessage.textContent = statusMessages[data.status] || 'Processing your query...';
     } catch (error) {

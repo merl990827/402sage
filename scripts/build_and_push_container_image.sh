@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# Clean up ignored files to ensure reproducible builds
+echo "Cleaning up ignored files (*.egg-info, __pycache__, etc.)..."
+find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+echo "✓ Cleanup complete"
+
 COMPOSE_FILE=$(yq -r '.artifacts.container.compose' rofl.yaml)
 TARGET_IMAGE=$(yq -r '.services.server.image' ${COMPOSE_FILE} | cut -d '@' -f 1)
 

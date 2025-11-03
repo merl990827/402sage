@@ -73,7 +73,7 @@ make verify-compose-image
 
 This builds the image locally with reproducible settings and compares it against the deployed image digest in `compose.yaml`. If the SHA256 digests match, it proves the deployed code hasn't been modified.
 
-**Alternative:** Check the [docker-reproducibility CI job](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-docker.yml) which performs these exact verification steps automatically.
+**Alternative:** Check the [![Docker Reproducibility](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-docker.yml/badge.svg)](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-docker.yml) CI job which performs these exact verification steps automatically.
 
 ### 3. Verify the ROFL Enclave
 
@@ -89,7 +89,7 @@ This verifies that the enclave identity (code measurements) match across:
 - The deployment manifest
 - The on-chain attested state
 
-**Alternative:** Check the [rofl-reproducibility CI job](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-rofl.yml) which performs these exact verification steps automatically.
+**Alternative:** Check the [![ROFL Reproducibility](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-rofl.yml/badge.svg)](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-rofl.yml) CI job which performs these exact verification steps automatically.
 
 ### 4. Ongoing Attestation
 
@@ -115,6 +115,42 @@ Learn more about continuous attestation at the [ROFL Registry](https://github.co
 - The cryptographic primitives (ECDSA signatures, SGX/TDX attestation)
 
 Everything else is verifiable.
+
+---
+
+## Using the API
+
+**Browser UI:**
+- Visit https://verisage.xyz to use the web interface
+- Pay with crypto wallet via x402 micropayments
+- Submit yes/no questions and get verified answers
+
+**API for Agents:**
+
+```bash
+# Get payment requirements
+curl https://api.verisage.xyz/api/v1/query
+
+# Submit query with x402 payment (requires x402 client)
+# See https://x402.org for client libraries
+
+# Example using Python x402 client:
+from x402.client import HTTPClient
+
+client = HTTPClient()
+response = client.post(
+    "https://api.verisage.xyz/api/v1/query",
+    json={"query": "Did Bitcoin reach $100k in 2024?"}
+)
+job_id = response.json()["job_id"]
+
+# Poll for results
+result = client.get(f"https://api.verisage.xyz/api/v1/query/{job_id}")
+```
+
+**API Documentation:**
+- Full API docs: https://api.verisage.xyz/docs
+- Recent resolved queries: https://api.verisage.xyz/api/v1/recent
 
 ---
 
