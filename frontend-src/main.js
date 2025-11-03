@@ -231,6 +231,11 @@ queryForm.addEventListener('submit', async (e) => {
       }
     }
 
+    // Detect x402 facilitator errors
+    if (errorMessage.includes('Settle failed')) {
+      errorMessage = `${errorMessage} (x402 facilitator issue - please try again)`;
+    }
+
     showError(`Failed to submit query: ${errorMessage}`);
     hideLoading();
     // Only re-enable if wallet is connected.
@@ -613,21 +618,21 @@ if (queryInput && charCount) {
 let recentJobIds = new Set();
 
 function fetchRecentResolutions() {
-  fetch(`${API_URL}/api/v1/recent?limit=5`)
+  fetch(`${API_URL}/api/v1/recent?limit=5&exclude_uncertain=false`)
     .then((response) => response.json())
     .then((jobs) => {
       const container = document.getElementById('recent-resolutions');
 
       if (jobs.length === 0 && recentJobIds.size === 0) {
         container.innerHTML =
-          '<p class="no-resolutions">No recent resolutions yet. Be the first!</p>';
+          '<p class="no-resolutions">No recent verifications yet. Be the first!</p>';
         return;
       }
 
       // Filter out jobs we already have.
       const newJobs = jobs.filter((job) => !recentJobIds.has(job.job_id));
 
-      // Remove "no resolutions" message if it exists and we have new jobs.
+      // Remove "no verifications" message if it exists and we have new jobs.
       if (newJobs.length > 0) {
         const noResMessage = container.querySelector('.no-resolutions');
         if (noResMessage) {
@@ -661,7 +666,7 @@ function fetchRecentResolutions() {
       }
     })
     .catch(() => {
-      // Silently handle error fetching recent resolutions
+      // Silently handle error fetching recent verifications
     });
 }
 
@@ -838,3 +843,28 @@ checkServiceHealth();
 
 // Poll health every 30 seconds.
 setInterval(checkServiceHealth, 30000);
+
+// Fetch and display payment info.
+async function fetchPaymentInfo() {
+  try {
+    const response = await fetch(`${API_URL}/info`);
+    const info = await response.json();
+
+    if (info.payment_address) {
+      const paymentInfoEl = document.getElementById('paymentInfo');
+      const shortAddress = `${info.payment_address.slice(0, 6)}...${info.payment_address.slice(-4)}`;
+      const networkDisplay = info.network === 'base' ? 'Base' : 'Base Sepolia';
+
+      paymentInfoEl.innerHTML = `
+        Payment Address:
+        <span style="font-family: monospace; color: #a1a1aa;" title="${escapeHtml(info.payment_address)}">${escapeHtml(shortAddress)}</span>
+        on ${networkDisplay}
+      `;
+    }
+  } catch {
+    // Silently handle error
+  }
+}
+
+// Fetch payment info on page load
+fetchPaymentInfo();

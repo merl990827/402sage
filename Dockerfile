@@ -3,7 +3,7 @@ FROM python:3.12-slim@sha256:d67a7b66b989ad6b6d6b10d428dcc5e0bfc3e5f88906e67d490
 WORKDIR /app
 
 # Pin versions and timestamps for reproducibility.
-ARG SOURCE_DATE_EPOCH=1755248916
+ARG SOURCE_DATE_EPOCH=1762154800
 ARG DEBIAN_SNAPSHOT=20250815T025533Z
 ARG DEBIAN_DIST=trixie
 ARG UV_VERSION=0.9.7
@@ -59,7 +59,6 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
-# Copy application files from builder stage in a single layer.
 COPY --from=builder /app/ /app/
 
 RUN find /app -type d -name '__pycache__' -prune -exec rm -rf "{}" + && \

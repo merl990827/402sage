@@ -9,6 +9,8 @@ Verisage answers objective yes/no questions by querying multiple independent AI 
 
 Built for deployment on [Oasis ROFL](https://docs.oasis.io/rofl/), the service will provide cryptographic attestation that proves the exact code executing in the TEE.
 
+> **Note:** While Verisage provides verifiable execution and consensus across multiple AI models, the underlying LLMs are not perfect and can still make mistakes or produce incorrect answers. Always verify critical information from authoritative sources.
+
 **Live deployment:**
 - Demo UI: https://verisage.xyz
 - API for agents: [https://api.verisage.xyz](https://api.verisage.xyz/docs)
@@ -65,16 +67,13 @@ The entire codebase is open source and auditable. Key trust properties you can v
 Verisage uses reproducible builds. You can verify the deployed Docker image matches this exact source code:
 
 ```bash
-# Build locally with reproducible settings
-./scripts/build_and_push_container_image.sh
-
-# Compare your build's SHA256 with the deployed image
-# (check docker-compose.yaml or deployment config for the deployed SHA256)
+# Build and verify the image matches the deployed digest
+make verify-compose-image
 ```
 
-The built image SHA256 should exactly match the deployed image SHA256. This proves no code has been modified.
+This builds the image locally with reproducible settings and compares it against the deployed image digest in `compose.yaml`. If the SHA256 digests match, it proves the deployed code hasn't been modified.
 
-**Alternative:** Check the [docker-reproducibility CI job](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-docker.yml) to see automated verification.
+**Alternative:** Check the [docker-reproducibility CI job](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-docker.yml) which performs these exact verification steps automatically.
 
 ### 3. Verify the ROFL Enclave
 
@@ -90,7 +89,7 @@ This verifies that the enclave identity (code measurements) match across:
 - The deployment manifest
 - The on-chain attested state
 
-**Alternative:** Check the [rofl-reproducibility CI job](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-rofl.yml) for automated verification.
+**Alternative:** Check the [rofl-reproducibility CI job](https://github.com/ptrus/verisage.xyz/actions/workflows/reproducibility-rofl.yml) which performs these exact verification steps automatically.
 
 ### 4. Ongoing Attestation
 

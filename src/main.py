@@ -356,7 +356,7 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
     before submitting.
 
     Args:
-        query: The dispute question to resolve
+        query: The question to verify
         request: FastAPI request object (for payment info)
 
     Returns:
@@ -539,6 +539,17 @@ app.include_router(api_v1)
 async def health_check(request: Request):
     """Health check endpoint (updated every minute by worker)."""
     return health_status
+
+
+@app.get("/info", tags=["System"])
+@limiter.limit("100/minute")
+async def get_info(request: Request):
+    """Get service information including payment address and network."""
+    return {
+        "payment_address": settings.x402_payment_address,
+        "network": settings.x402_network,
+        "price": settings.x402_price,
+    }
 
 
 if __name__ == "__main__":

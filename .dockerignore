@@ -3,6 +3,7 @@ untracked/
 node_modules/
 __pycache__/
 *.pyc
+.venv/
 .env
 .env.*
 
@@ -13,6 +14,7 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
@@ -21,6 +23,26 @@ tests/
 test_*.py
 *_test.py
 test_results/
+
+# Database files
+*.db
+*.db-wal
+*.db-shm
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Temporary files
+SESSION_SUMMARY.md
+self_todo
+*.tmp
+*.temp
 
 # Misc
 *.md

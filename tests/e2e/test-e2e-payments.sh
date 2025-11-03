@@ -17,6 +17,12 @@ MAX_WAIT=30
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Use custom compose file if provided, otherwise use default
+COMPOSE_FILE_ARG=""
+if [ -n "${COMPOSE_FILE:-}" ]; then
+    COMPOSE_FILE_ARG="--file ${COMPOSE_FILE}"
+fi
+
 # Load environment variables
 # Load client config from tests/e2e/.env (for PRIVATE_KEY)
 if [ -f "$SCRIPT_DIR/.env" ]; then
@@ -57,7 +63,7 @@ cleanup() {
     echo ""
     echo -e "${YELLOW}Cleaning up...${NC}"
     cd "$PROJECT_ROOT"
-    docker compose --env-file tests/e2e/.env.test-payments down -v 2>/dev/null || true
+    docker compose ${COMPOSE_FILE_ARG} --env-file tests/e2e/.env.test-payments down -v 2>/dev/null || true
     echo -e "${GREEN}Cleanup complete${NC}"
 }
 
@@ -67,7 +73,7 @@ trap cleanup EXIT
 cd "$PROJECT_ROOT"
 
 echo -e "${BLUE}1. Building and starting services with docker compose (payment mode)...${NC}"
-docker compose --env-file tests/e2e/.env.test-payments up -d --build
+docker compose ${COMPOSE_FILE_ARG} --env-file tests/e2e/.env.test-payments up -d --build
 
 echo ""
 echo -e "${BLUE}2. Waiting for server to be ready...${NC}"
@@ -78,7 +84,7 @@ until curl -s http://localhost:$PORT/health > /dev/null 2>&1; do
         echo -e "${RED}✗ Server failed to start after ${MAX_WAIT}s${NC}"
         echo ""
         echo "Container logs:"
-        docker compose logs
+        docker compose ${COMPOSE_FILE_ARG} logs
         exit 1
     fi
     sleep 1

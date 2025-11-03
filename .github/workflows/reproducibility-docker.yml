@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     env:
       DOCKER_GIT_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.git_ref || 'master' }}
     steps:

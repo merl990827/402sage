@@ -18,12 +18,18 @@ MAX_POLLS=15
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Use custom compose file if provided, otherwise use default
+COMPOSE_FILE_ARG=""
+if [ -n "${COMPOSE_FILE:-}" ]; then
+    COMPOSE_FILE_ARG="--file ${COMPOSE_FILE}"
+fi
+
 # Cleanup function
 cleanup() {
     echo ""
     echo "Cleaning up..."
     cd "$PROJECT_ROOT"
-    docker compose --env-file tests/e2e/.env.test-mock down -v 2>/dev/null || true
+    docker compose ${COMPOSE_FILE_ARG} --env-file tests/e2e/.env.test-mock down -v 2>/dev/null || true
 }
 
 # Set trap to cleanup on exit
@@ -32,7 +38,7 @@ trap cleanup EXIT
 cd "$PROJECT_ROOT"
 
 echo "1. Building and starting services with docker compose (mock mode)..."
-docker compose --env-file tests/e2e/.env.test-mock up -d --build
+docker compose ${COMPOSE_FILE_ARG} --env-file tests/e2e/.env.test-mock up -d --build
 
 echo ""
 echo "2. Waiting for server to be ready..."
@@ -43,7 +49,7 @@ until curl -s http://localhost:$PORT/health > /dev/null 2>&1; do
         echo -e "${RED}✗ Server failed to start after ${MAX_WAIT}s${NC}"
         echo ""
         echo "Container logs:"
-        docker compose logs
+        docker compose ${COMPOSE_FILE_ARG} logs
         exit 1
     fi
     sleep 1

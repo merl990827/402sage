@@ -6,11 +6,25 @@ test-unit:
 
 test-e2e:
 	@echo "Running E2E tests..."
-	cd tests/e2e && ./test-e2e.sh
+	@echo "Preparing compose file for local testing..."
+	@# Create temporary compose file without SHA256 digests to use locally built image
+	@TMP_COMPOSE=$$(mktemp); \
+		sed 's/@sha256:[a-f0-9]\{64\}//g' compose.yaml > "$$TMP_COMPOSE"; \
+		COMPOSE_FILE="$$TMP_COMPOSE" bash -c 'cd tests/e2e && ./test-e2e.sh'; \
+		TEST_EXIT=$$?; \
+		rm -f "$$TMP_COMPOSE"; \
+		exit $$TEST_EXIT
 
 test-e2e-payments:
 	@echo "Running E2E payment tests..."
-	cd tests/e2e && ./test-e2e-payments.sh
+	@echo "Preparing compose file for local testing..."
+	@# Create temporary compose file without SHA256 digests to use locally built image
+	@TMP_COMPOSE=$$(mktemp); \
+		sed 's/@sha256:[a-f0-9]\{64\}//g' compose.yaml > "$$TMP_COMPOSE"; \
+		COMPOSE_FILE="$$TMP_COMPOSE" bash -c 'cd tests/e2e && ./test-e2e-payments.sh'; \
+		TEST_EXIT=$$?; \
+		rm -f "$$TMP_COMPOSE"; \
+		exit $$TEST_EXIT
 
 lint:
 	@echo "Running linters..."
@@ -44,13 +58,13 @@ build-docker:
 
 update-compose-image:
 	@echo "Building, pushing, and updating compose image digest..."
-	UPDATE_COMPOSE_SHA=true PUSH_IMAGE=true OUTPUT_IMAGE_NAME_PATH="/tmp/image-name" ./scripts/build_and_push_container_image.sh
+	UPDATE_COMPOSE_SHA=true ./scripts/build_and_push_container_image.sh
 
 verify-compose-image:
 	@echo "Building image and verifying compose digest..."
 	@set -euo pipefail; \
 		TMP_FILE=$$(mktemp); \
-		OUTPUT_IMAGE_NAME_PATH="$$TMP_FILE" ./scripts/build_and_push_container_image.sh; \
+		PUSH_IMAGE=false OUTPUT_IMAGE_NAME_PATH="$$TMP_FILE" ./scripts/build_and_push_container_image.sh; \
 		EXPECTED_VERISAGE_IMAGE="$$(cat "$$TMP_FILE")" ./scripts/verify_container_image.sh; \
 		rm -f "$$TMP_FILE"
 
