@@ -1,71 +1,28 @@
-FROM python:3.12-slim@sha256:d67a7b66b989ad6b6d6b10d428dcc5e0bfc3e5f88906e67d490c4d3daac57047 AS builder
+# Dockerfile (compatible with Railway/Render)
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=on \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# Pin versions and timestamps for reproducibility.
-ARG SOURCE_DATE_EPOCH=1762154800
-ARG DEBIAN_SNAPSHOT=20250815T025533Z
-ARG DEBIAN_DIST=trixie
-ARG UV_VERSION=0.9.7
-# Do not include uv metadata as that includes non-reproducible timestamps.
-ARG UV_NO_INSTALLER_METADATA=1
-# Disable emitting debug symbols as those can contain randomized local paths.
-ARG CFLAGS="-g0"
-ENV PYTHONDONTWRITEBYTECODE=1
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl git \
+ && rm -rf /var/lib/apt/lists/*
 
-# Install Debian packages from snapshot for reproducibility.
-RUN rm -f /etc/apt/sources.list.d/* && \
-    echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} ${DEBIAN_DIST} main" > /etc/apt/sources.list && \
-    echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} ${DEBIAN_DIST}-security main" >> /etc/apt/sources.list && \
-    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10no-check-valid-until && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends gcc libc6-dev && \
-    rm -rf /var/lib/apt/lists/*
+# Copy project
+COPY . .
 
-# Install uv for Python package management.
-RUN pip install uv==${UV_VERSION}
-
-COPY pyproject.toml uv.lock ./
-COPY src/ ./src/
-COPY static/ ./static/
-COPY start-server.sh start-worker.sh ./
-
-RUN find . -exec touch -d @${SOURCE_DATE_EPOCH} "{}" \; && \
-    find . -type l -exec touch -h -d @${SOURCE_DATE_EPOCH} "{}" \; && \
-    find . -type f -exec chmod 644 "{}" \; && \
-    find . -type d -exec chmod 755 "{}" \; && \
-chmod 755 start-server.sh start-worker.sh && \
-    chown -R root:root .
-
-RUN uv venv && \
-    . .venv/bin/activate && \
-    uv sync --locked && \
-    find /app/.venv -exec touch -d @${SOURCE_DATE_EPOCH} "{}" \; && \
-    find /app -type d -name '__pycache__' -prune -exec rm -rf "{}" + && \
-    find /app -type l -exec touch -h -d @${SOURCE_DATE_EPOCH} "{}" \; && \
-    find /app -exec touch -d @${SOURCE_DATE_EPOCH} "{}" \; && \
-    touch -d @${SOURCE_DATE_EPOCH} /app
-
-
-FROM python:3.12-slim@sha256:d67a7b66b989ad6b6d6b10d428dcc5e0bfc3e5f88906e67d490c4d3daac57047
-
-WORKDIR /app
-
-ARG SOURCE_DATE_EPOCH
-
-# Set environment variables.
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH" \
-    SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
-
-COPY --from=builder /app/ /app/
-
-RUN find /app -type d -name '__pycache__' -prune -exec rm -rf "{}" + && \
-    find /app -type l -exec touch -h -d @${SOURCE_DATE_EPOCH} "{}" \; && \
-    find /app -exec touch -d @${SOURCE_DATE_EPOCH} "{}" \; && \
-    touch -d @${SOURCE_DATE_EPOCH} /app
+# Install python deps (reads pyproject.toml)
+RUN python -m pip install --upgrade pip setuptools wheel \
+ && pip install "uvicorn[standard]" \
+ && pip install .
 
 EXPOSE 8000
+ENV PORT=8000
 
-# No default CMD - use compose.yaml to specify start-server.sh or start-worker.sh.
+# If your main app is elsewhere, change src.main:app accordingly
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
