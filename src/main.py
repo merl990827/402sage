@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://<YOUR-FRONTEND-SUBDOMAIN>.up.railway.app",  # your Railway frontend URL
+        "https://loyal-courtesy-production-617e.up.railway.app/",  # your Railway frontend URL
     ],
     allow_credentials=True,
     allow_methods=["*"],
