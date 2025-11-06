@@ -1,4 +1,4 @@
-"""FastAPI server for Verisage - Multi-LLM Oracle."""
+"""FastAPI server for sage402 - Multi-LLM Oracle."""
 
 import asyncio
 import logging
@@ -127,7 +127,7 @@ async def lifespan(app: FastAPI):
 
 # Configure FastAPI application.
 app = FastAPI(
-    title="Verisage",
+    title="sage402",
     description=(
         "Verifiable Multi-LLM Truth Oracle running on Oasis ROFL. "
         "Trustless fact verification powered by multiple independent AI providers (Claude, Gemini, OpenAI). "
@@ -283,7 +283,7 @@ if not settings.debug_payments:
         network=settings.x402_network,
         description="Verifiable Multi-LLM Truth Oracle - Trustless fact verification powered by multiple independent AI providers (Claude, Gemini, OpenAI). Cryptographically signed responses from code running in Oasis ROFL TEE.",
         paywall_config=PaywallConfig(
-            app_name="Verisage.xyz",
+            app_name="sage402",
             app_logo="/static/logo.png",
         ),
         input_schema=HTTPInputSchema(
