@@ -117,8 +117,8 @@ connectButton.addEventListener('click', async () => {
     });
 
     // Wrap fetch with payment handling.
-    // maxValue: 1000000000000000000 = $1000000000 worth of USDC (in atomic units).
-    fetchWithPay = wrapFetchWithPayment(fetch, walletClient, 1000000000000000000);
+    // maxValue: 10000000 = $10 worth of USDC (in atomic units).
+    fetchWithPay = wrapFetchWithPayment(fetch, walletClient, 10000000);
 
     // Update UI.
     connectButton.classList.add('connected');
