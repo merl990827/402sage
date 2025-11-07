@@ -147,8 +147,23 @@ def require_payment_async_settle(
                     continue
                 return SettleResponse(success=False, error_reason=f"Settlement error: {e!s}")
 
-            if response.status_code == 200:
-                return SettleResponse(**response.json())
+if response.status_code == 200:
+    data = response.json()
+    # Accept both old and new facilitator shapes.
+    if isinstance(data, dict):
+        if "success" in data or "error_reason" in data:
+            # already in the expected shape
+            return SettleResponse(
+                success=bool(data.get("success", False)),
+                error_reason=data.get("error_reason"),
+            )
+        if "isValid" in data:  # facilitator variant
+            ok = bool(data.get("isValid"))
+            reason = None if ok else (data.get("invalidReason") or data.get("error"))
+            return SettleResponse(success=ok, error_reason=reason)
+    # Fallback: treat 200 with unknown shape as success
+    return SettleResponse(success=True, error_reason=None)
+
 
             # retry if facilitator hasn't found the payment yet
             if response.status_code == 404 and attempt < max_retries:
