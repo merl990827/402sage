@@ -1,6 +1,7 @@
 """FastAPI server for sage402 - Multi-LLM Oracle."""
 
 import asyncio
+import threading
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -28,6 +29,21 @@ from src.workers import process_oracle_query
 from src.x402_custom_middleware import require_payment_async_settle
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Fire-and-forget helper so job processing always runs after settlement
+# ---------------------------------------------------------------------------
+def _run_in_background(fn, *args, **kwargs):
+    """
+    Run a sync function in the background regardless of context.
+    If there's an event loop, use its default executor; otherwise start a daemon thread.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    except RuntimeError:
+        threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True).start()
+
 
 # Global health status (updated by background task every minute).
 health_status = {"status": "healthy", "last_check": None}
@@ -178,11 +194,9 @@ app.add_middleware(
 def get_client_ip(request: Request) -> str:
     """Get client IP, respecting CloudFlare proxy if configured."""
     if settings.behind_cloudflare:
-        # Trust CF-Connecting-IP header only when behind CloudFlare.
         cf_ip = request.headers.get("CF-Connecting-IP")
         if cf_ip:
             return cf_ip
-    # Fall back to direct connection IP.
     return get_remote_address(request)
 
 
@@ -191,7 +205,7 @@ limiter = Limiter(key_func=get_client_ip)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Add CORS middleware.
+# Add CORS middleware (broad allowlist from env).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.get_cors_origins(),
@@ -216,14 +230,12 @@ async def update_health_status_periodically():
             status = "healthy"
             status_details = {}
 
-            # Check if queue is overloaded.
             if queued_count > 100:
                 status = "unhealthy"
                 status_details["queue_status"] = "overloaded"
                 status_details["queued_jobs"] = queued_count
             elif stats["total"] > 0:
                 failure_rate = stats["failed"] / stats["total"]
-                # Mark as degraded if >50% of last 10 jobs failed.
                 if failure_rate > 0.5:
                     status = "degraded"
 
@@ -265,13 +277,11 @@ if not settings.debug_payments:
     facilitator_config = None
     if settings.environment == "production":
         if settings.facilitator_url:
-            # Use custom facilitator URL
             from x402.facilitator import FacilitatorConfig
 
             facilitator_config = FacilitatorConfig(url=settings.facilitator_url)
             logger.info(f"✓ Using custom facilitator URL: {settings.facilitator_url}")
         else:
-            # Use Coinbase CDP facilitator
             from cdp.x402 import create_facilitator_config
 
             facilitator_config = create_facilitator_config(
@@ -287,9 +297,8 @@ if not settings.debug_payments:
             job_id = request.state.job_id
             query = request.state.query
             logger.info(f"Settlement succeeded - queueing job {job_id} for processing")
-
-            # Enqueue task for background processing
-            process_oracle_query(job_id, query)
+            # Ensure processing runs even if no separate worker loop is present
+            _run_in_background(process_oracle_query, job_id, query)
 
     async def on_settlement_failure(
         request: Request, payment, payment_requirements, error_reason: str
@@ -298,18 +307,19 @@ if not settings.debug_payments:
         if hasattr(request.state, "job_id"):
             job_id = request.state.job_id
             logger.warning(f"Settlement failed for job {job_id}: {error_reason}")
-
-            # Mark the job as failed with settlement error
             job_store.update_job_error(job_id, "Payment settlement failed")
 
-    # Wrap payment middleware to skip OPTIONS requests for CORS.
     # Using custom async-settle middleware to avoid proxy idle timeout issues
     payment_middleware = require_payment_async_settle(
         path="/api/v1/query",
         price=settings.x402_price,
         pay_to_address=settings.x402_payment_address,
         network=settings.x402_network,
-        description="Verifiable Multi-LLM Truth Oracle - Trustless fact verification powered by multiple independent AI providers (Claude, Gemini, OpenAI). Cryptographically signed responses from code running in Oasis ROFL TEE.",
+        description=(
+            "Verifiable Multi-LLM Truth Oracle - Trustless fact verification powered by multiple "
+            "independent AI providers (Claude, Gemini, OpenAI). Cryptographically signed responses "
+            "from code running in Oasis ROFL TEE."
+        ),
         paywall_config=PaywallConfig(
             app_name="sage402",
             app_logo="/static/logo.png",
@@ -319,7 +329,11 @@ if not settings.debug_payments:
             body_fields={
                 "query": {
                     "type": "string",
-                    "description": "Question to verify (should be answerable with YES/NO). Be specific with dates, names, and facts. Example: 'Did the Lakers win against the Warriors on October 22, 2025?'",
+                    "description": (
+                        "Question to verify (should be answerable with YES/NO). Be specific with dates, "
+                        "names, and facts. Example: 'Did the Lakers win against the Warriors on "
+                        "October 22, 2025?'"
+                    ),
                     "minLength": 10,
                     "maxLength": 256,
                     "pattern": r'^[a-zA-Z0-9\s.,?!\-\'"":;()/@#$%&+=]+$',
@@ -352,9 +366,7 @@ if not settings.debug_payments:
                 response.headers["Access-Control-Allow-Methods"] = "*"
                 response.headers["Access-Control-Allow-Headers"] = "*"
 
-        # Note: Job creation now happens asynchronously via settlement callbacks
-        # to avoid blocking the response for proxy idle timeout
-
+        # Job creation happens in the endpoint; settlement callback triggers processing.
         return response
 
 
@@ -368,38 +380,15 @@ async def custom_swagger_ui_html():
         swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
     )
 
-    # Inject custom CSS into the HTML.
     html_str = html.body.decode()
     html_str = html_str.replace("</head>", f"<style>{CUSTOM_SWAGGER_CSS}</style></head>")
-
     return HTMLResponse(content=html_str)
 
 
 @api_v1.post("/query", response_model=JobResponse, tags=["Oracle (Paid)"])
 @limiter.limit("100/minute")
 async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
-    """Submit a query to the oracle for processing.
-
-    This endpoint requires payment via the x402 protocol.
-
-    Rate limit: 100 requests per minute per IP.
-
-    **IMPORTANT:** Check the `/health` endpoint before submitting jobs. If the service
-    is overloaded (status: "unhealthy"), your payment will be accepted but the job
-    will be rejected with HTTP 503. Wait until status returns to "healthy" or "degraded"
-    before submitting.
-
-    Args:
-        query: The question to verify
-        request: FastAPI request object (for payment info)
-
-    Returns:
-        JobResponse with job_id for polling
-
-    Raises:
-        HTTPException: If service is overloaded (queue full)
-    """
-    # Check if service is overloaded before accepting new jobs.
+    """Submit a query to the oracle for processing (requires x402 payment)."""
     if health_status.get("status") == "unhealthy":
         raise HTTPException(
             status_code=503,
@@ -417,7 +406,6 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
     network = None
 
     try:
-        # Extract payment info from x402 middleware
         if hasattr(request.state, "verify_response"):
             verify_resp = request.state.verify_response
             if hasattr(verify_resp, "payer"):
@@ -427,15 +415,10 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
             payment_details = request.state.payment_details
             if hasattr(payment_details, "network"):
                 network = payment_details.network
-
-        # Note: tx_hash is not available from x402 verify response
-        # It would only be available in SettleResponse which happens after settlement
     except Exception as e:
-        # If payment info extraction fails, continue without it.
         logger.warning(f"Failed to extract payment info: {e}", exc_info=True)
 
-    # Create job immediately after payment verification.
-    # Settlement will happen asynchronously in the background.
+    # Create job immediately after verification; processing is kicked off after settlement.
     job_id, created_at = job_store.create_job(
         query.query,
         payer_address=payer_address,
@@ -443,13 +426,13 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
         network=network,
     )
 
-    # Store job_id and query in request state so settlement callbacks can access them.
+    # Store for settlement callbacks.
     request.state.job_id = job_id
     request.state.query = query.query
 
-    # In debug mode, queue job immediately since there's no settlement to wait for.
+    # In debug mode, there is no settlement—process now in background.
     if settings.debug_payments:
-        process_oracle_query(job_id, query.query)
+        _run_in_background(process_oracle_query, job_id, query.query)
 
     return JobResponse(
         job_id=job_id,
@@ -462,28 +445,11 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
 @api_v1.get("/query/{job_id}", response_model=JobResultResponse, tags=["Oracle"])
 @limiter.limit("100/minute")
 async def get_query_result(job_id: str, request: Request) -> JobResultResponse:
-    """Get the status and result of a query job.
-
-    Completed results include cryptographic signatures generated inside the ROFL TEE using a
-    SECP256K1 key. The signature and public_key fields can be used to verify the response
-    authenticity. The public key can be verified against the on-chain attested state in the
-    Oasis ROFL registry: https://github.com/ptrus/rofl-registry
-
-    Args:
-        job_id: The job identifier
-
-    Returns:
-        JobResultResponse with status and result if completed (including signature and public_key)
-
-    Raises:
-        HTTPException: If job not found
-    """
+    """Get the status and result of a query job."""
     job_data = job_store.get_job(job_id)
-
     if job_data is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Parse result if completed.
     result = None
     if job_data["result_json"]:
         result = OracleResult.model_validate_json(job_data["result_json"])
@@ -507,21 +473,8 @@ async def get_query_result(job_id: str, request: Request) -> JobResultResponse:
 @api_v1.get("/recent", tags=["Public Feed"])
 @limiter.limit("100/minute")
 async def get_recent_jobs(request: Request, limit: int = 5, exclude_uncertain: bool = True):
-    """Get recently completed jobs (public feed).
-
-    Results include cryptographic signatures generated inside the ROFL TEE. The public key
-    can be verified against the on-chain attested state to prove response authenticity.
-
-    Args:
-        limit: Maximum number of jobs to return (default: 5, max: 20)
-        exclude_uncertain: Exclude jobs with uncertain results (default: True)
-
-    Returns:
-        List of recent completed jobs with results (including signatures and public keys)
-    """
-    # Limit to max 20 to prevent abuse.
+    """Get recently completed jobs (public feed)."""
     limit = min(limit, 20)
-
     jobs_data = job_store.get_recent_completed_jobs(limit, exclude_uncertain)
 
     jobs = []
