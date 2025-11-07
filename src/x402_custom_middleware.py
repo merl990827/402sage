@@ -1,10 +1,12 @@
-"""Custom x402 middleware adapted for environments with idle timeout constraints.
+"""
+Custom x402 middleware adapted for environments with idle timeout constraints.
 
 This is adapted from:
 https://github.com/coinbase/x402/blob/7bbfaaf2589df2f787d3fc0b83853a0efc709287/python/x402/src/x402/fastapi/middleware.py#L33
 
-Key modification: Settlement happens asynchronously after the response is returned,
-allowing the endpoint to respond within 6 seconds to avoid proxy idle timeouts.
+Key modifications:
+- Settlement happens asynchronously after the response is returned.
+- Longer HTTP timeouts + retry logic for facilitator /settle (handles 404 + ReadTimeout).
 """
 
 import asyncio
@@ -51,6 +53,7 @@ def require_payment_async_settle(
     output_schema: Any | None = None,
     discoverable: bool | None = True,
     facilitator_config: FacilitatorConfig | None = None,
+    # IMPORTANT: pass "base" from your app for Base mainnet; default remains testnet.
     network: str = "base-sepolia",
     resource: str | None = None,
     paywall_config: PaywallConfig | None = None,
@@ -58,46 +61,21 @@ def require_payment_async_settle(
     on_settlement_success: Callable | None = None,
     on_settlement_failure: Callable | None = None,
 ):
-    """Generate a FastAPI middleware that gates payments for an endpoint.
+    """
+    Generate a FastAPI middleware that gates payments for an endpoint.
 
     This version returns the response immediately after payment verification,
     then settles the payment asynchronously in the background. This allows the
     endpoint to respond quickly (within proxy idle timeout) while still completing
     the settlement process.
-
-    Args:
-        price (Price): Payment price. Can be:
-            - Money: USD amount as string/int (e.g., "$3.10", 0.10, "0.001") - defaults to USDC
-            - TokenAmount: Custom token amount with asset information
-        pay_to_address (str): Ethereum address to receive the payment
-        path (str | list[str], optional): Path to gate with payments. Defaults to "*" for all paths.
-        description (str, optional): Description of what is being purchased. Defaults to "".
-        mime_type (str, optional): MIME type of the resource. Defaults to "".
-        max_deadline_seconds (int, optional): Maximum time allowed for payment. Defaults to 60.
-        input_schema (Optional[HTTPInputSchema], optional): Schema for the request structure. Defaults to None.
-        output_schema (Optional[Any], optional): Schema for the response. Defaults to None.
-        discoverable (bool, optional): Whether the route is discoverable. Defaults to True.
-        facilitator_config (Optional[Dict[str, Any]], optional): Configuration for the payment facilitator.
-            If not provided, defaults to the public x402.org facilitator.
-        network (str, optional): Ethereum network ID. Defaults to "base-sepolia" (Base Sepolia testnet).
-        resource (Optional[str], optional): Resource URL. Defaults to None (uses request URL).
-        paywall_config (Optional[PaywallConfig], optional): Configuration for paywall UI customization.
-            Includes options like cdp_client_key, app_name, app_logo, session_token_endpoint.
-        custom_paywall_html (Optional[str], optional): Custom HTML to display for paywall instead of default.
-        on_settlement_success (Optional[Callable], optional): Callback function called when settlement succeeds.
-            Should accept (request, payment, payment_requirements) as arguments.
-        on_settlement_failure (Optional[Callable], optional): Callback function called when settlement fails.
-            Should accept (request, payment, payment_requirements, error_reason) as arguments.
-
-    Returns:
-        Callable: FastAPI middleware function that checks for valid payment before processing requests
     """
 
-    # Validate network is supported
+    # Validate network
     supported_networks = get_args(SupportedNetworks)
     if network not in supported_networks:
         raise ValueError(f"Unsupported network: {network}. Must be one of: {supported_networks}")
 
+    # Compute payment requirements (amounts, domain, asset)
     try:
         max_amount_required, asset_address, eip712_domain = process_price_to_atomic_amount(
             price, network
@@ -108,76 +86,98 @@ def require_payment_async_settle(
     facilitator = FacilitatorClient(facilitator_config)
 
     def parse_error_response(response: httpx.Response, default_msg: str) -> str:
-        """Extract error message from HTTP response."""
+        """Extract a useful error message from HTTP response."""
         try:
             error_data = response.json()
             if isinstance(error_data, dict) and "error" in error_data:
-                return error_data["error"]
+                return str(error_data["error"])
         except Exception:
             pass
-
-        # Fallback to text or default message
         text = response.text.strip()
-        return f"HTTP {response.status_code}: {text[:100]}" if text else default_msg
+        return f"HTTP {response.status_code}: {text[:200]}" if text else default_msg
 
-    async def settle_with_retry(client: httpx.AsyncClient, payment, payment_requirements, headers):
-        """Attempt settlement with retry logic for 404 responses."""
+    async def settle_with_retry(
+        client: httpx.AsyncClient,
+        payment: PaymentPayload,
+        payment_requirements: PaymentRequirements,
+        headers: dict[str, str],
+    ) -> SettleResponse:
+        """
+        Attempt settlement with retry logic for 404 (payment not registered yet) and timeouts.
+        """
         max_retries = 5
-        retry_delays = [1.0, 1.0, 2.0, 3.0, 4.0]  # Total: 11 seconds (1s initial + retries)
+        # Backoff ~1,1,2,3,5,8 (about 20s total worst case)
+        retry_delays = [1.0, 1.0, 2.0, 3.0, 5.0, 8.0]
 
-        # Wait 1 second before first attempt to give facilitator time to register payment
+        # Small pause before the first attempt so facilitator can register verify
         await asyncio.sleep(1.0)
 
         for attempt in range(max_retries + 1):
-            response = await client.post(
-                f"{facilitator.config['url']}/settle",
-                json={
-                    "x402Version": payment.x402_version,
-                    "paymentPayload": payment.model_dump(by_alias=True),
-                    "paymentRequirements": payment_requirements.model_dump(
-                        by_alias=True, exclude_none=True
-                    ),
-                },
-                headers=headers,
-                follow_redirects=True,
-            )
+            try:
+                response = await client.post(
+                    f"{facilitator.config['url']}/settle",
+                    json={
+                        "x402Version": payment.x402_version,
+                        "paymentPayload": payment.model_dump(by_alias=True),
+                        "paymentRequirements": payment_requirements.model_dump(
+                            by_alias=True, exclude_none=True
+                        ),
+                    },
+                    headers=headers,
+                    follow_redirects=True,
+                )
+            except httpx.ReadTimeout:
+                if attempt < max_retries:
+                    delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                    logger.warning(
+                        f"Settlement timeout (attempt {attempt + 1}/{max_retries + 1}); "
+                        f"retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                return SettleResponse(success=False, error_reason="Facilitator timeout during settlement")
+            except Exception as e:
+                if attempt < max_retries:
+                    delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                    logger.warning(
+                        f"Settlement error {e!r} (attempt {attempt + 1}/{max_retries + 1}); "
+                        f"retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                return SettleResponse(success=False, error_reason=f"Settlement error: {e!s}")
 
-            # Success
             if response.status_code == 200:
                 return SettleResponse(**response.json())
 
-            # Retry on 404 (payment not registered yet after verification)
+            # retry if facilitator hasn't found the payment yet
             if response.status_code == 404 and attempt < max_retries:
-                delay = retry_delays[attempt]
+                delay = retry_delays[min(attempt, len(retry_delays) - 1)]
                 logger.info(
-                    f"Settlement returned 404 (attempt {attempt + 1}/{max_retries + 1}), "
+                    f"Settlement returned 404 (attempt {attempt + 1}/{max_retries + 1}); "
                     f"retrying in {delay}s..."
                 )
                 await asyncio.sleep(delay)
                 continue
 
-            # Failed after retries or non-retryable error
-            error_msg = parse_error_response(
-                response,
-                f"Payment not found after {max_retries + 1} attempts"
-                if response.status_code == 404
-                else f"Facilitator returned HTTP {response.status_code}",
-            )
+            # other failure
+            error_msg = parse_error_response(response, f"Facilitator returned HTTP {response.status_code}")
             return SettleResponse(success=False, error_reason=error_msg)
 
-    async def settle_with_timeout(payment, payment_requirements):
-        """Settle payment with extended timeout (30 seconds)."""
-        headers = {"Content-Type": "application/json"}
+    async def settle_with_timeout(payment: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse:
+        """Settle payment with generous timeouts; /settle may take tens of seconds."""
+        headers: dict[str, str] = {"Content-Type": "application/json"}
 
         if facilitator.config.get("create_headers"):
             custom_headers = await facilitator.config["create_headers"]()
             headers.update(custom_headers.get("settle", {}))
 
-        timeout = httpx.Timeout(30.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        # More generous timeouts (connect/read/write/pool). Enable HTTP/2 for better latency.
+        timeout = httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=60.0)
+        async with httpx.AsyncClient(timeout=timeout, http2=True) as client:
             return await settle_with_retry(client, payment, payment_requirements, headers)
 
-    async def settle_in_background(request, payment, payment_requirements):
+    async def settle_in_background(request: Request, payment: PaymentPayload, payment_requirements: PaymentRequirements) -> None:
         """Settle payment in the background after response is sent."""
         try:
             settle_response = await settle_with_timeout(payment, payment_requirements)
@@ -185,7 +185,6 @@ def require_payment_async_settle(
                 logger.info(
                     f"Payment settled successfully for resource: {payment_requirements.resource}"
                 )
-                # Call success callback if provided
                 if on_settlement_success:
                     try:
                         await on_settlement_success(request, payment, payment_requirements)
@@ -196,7 +195,6 @@ def require_payment_async_settle(
             else:
                 error_reason = settle_response.error_reason or "Unknown error"
                 logger.warning(f"Settlement failed: {error_reason}")
-                # Call failure callback if provided
                 if on_settlement_failure:
                     try:
                         await on_settlement_failure(
@@ -208,7 +206,6 @@ def require_payment_async_settle(
                         )
         except Exception as e:
             logger.error(f"Settlement error: {e}", exc_info=True)
-            # Call failure callback on exception
             if on_settlement_failure:
                 try:
                     await on_settlement_failure(
@@ -218,14 +215,14 @@ def require_payment_async_settle(
                     logger.error(f"Error in settlement failure callback: {cb_error}", exc_info=True)
 
     async def middleware(request: Request, call_next: Callable):
-        # Skip if the path is not the same as the path in the middleware
+        # Skip if the path does not match the gated path(s)
         if not path_is_match(path, request.url.path):
             return await call_next(request)
 
-        # Get resource URL if not explicitly provided
+        # Use explicit resource or the request URL
         resource_url = resource or str(request.url)
 
-        # Construct payment details
+        # Build payment requirements
         payment_requirements = [
             PaymentRequirements(
                 scheme="exact",
@@ -251,7 +248,7 @@ def require_payment_async_settle(
         ]
 
         def x402_response(error: str):
-            """Create a 402 response with payment requirements."""
+            """Return a 402 response (HTML paywall for browsers, JSON otherwise)."""
             request_headers = dict(request.headers)
             status_code = 402
 
@@ -260,12 +257,7 @@ def require_payment_async_settle(
                     error, payment_requirements, paywall_config
                 )
                 headers = {"Content-Type": "text/html; charset=utf-8"}
-
-                return HTMLResponse(
-                    content=html_content,
-                    status_code=status_code,
-                    headers=headers,
-                )
+                return HTMLResponse(content=html_content, status_code=status_code, headers=headers)
             else:
                 response_data = x402PaymentRequiredResponse(
                     x402_version=x402_VERSION,
@@ -273,20 +265,14 @@ def require_payment_async_settle(
                     error=error,
                 ).model_dump(by_alias=True)
                 headers = {"Content-Type": "application/json"}
+                return JSONResponse(content=response_data, status_code=status_code, headers=headers)
 
-                return JSONResponse(
-                    content=response_data,
-                    status_code=status_code,
-                    headers=headers,
-                )
-
-        # Check for payment header
+        # Require X-PAYMENT header
         payment_header = request.headers.get("X-PAYMENT", "")
-
         if payment_header == "":
             return x402_response("No X-PAYMENT header provided")
 
-        # Decode payment header
+        # Decode payment payload
         try:
             payment_dict = json.loads(safe_base64_decode(payment_header))
             payment = PaymentPayload(**payment_dict)
@@ -296,39 +282,35 @@ def require_payment_async_settle(
             )
             return x402_response("Invalid payment header format")
 
-        # Find matching payment requirements
+        # Match requirements
         selected_payment_requirements = find_matching_payment_requirements(
             payment_requirements, payment
         )
-
         if not selected_payment_requirements:
             return x402_response("No matching payment requirements found")
 
-        # Verify payment
+        # Verify payment with facilitator
         verify_response = await facilitator.verify(payment, selected_payment_requirements)
-
         if not verify_response.is_valid:
             error_reason = verify_response.invalid_reason or "Unknown error"
             return x402_response(f"Invalid payment: {error_reason}")
 
+        # Stash for downstream handlers if needed
         request.state.payment_details = selected_payment_requirements
         request.state.verify_response = verify_response
 
-        # Process the request
+        # Call the actual endpoint
         response = await call_next(request)
 
-        # Early return without settling if the response is not a 2xx
-        if response.status_code < 200 or response.status_code >= 300:
+        # If non-2xx, don't attempt settlement
+        if not (200 <= response.status_code < 300):
             return response
 
-        # Schedule settlement to happen in the background (non-blocking)
-        # This allows the response to be sent immediately, avoiding proxy idle timeouts
-        asyncio.create_task(settle_in_background(request, payment, selected_payment_requirements))
-
-        # Return response immediately without waiting for settlement
-        # Note: We don't include X-PAYMENT-RESPONSE header since settlement happens async
+        # Kick off settlement in the background so the client gets a fast response
+        asyncio.create_task(
+            settle_in_background(request, payment, selected_payment_requirements)
+        )
         logger.info("Returning response immediately, settlement scheduled in background")
-
         return response
 
     return middleware
