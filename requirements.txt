@@ -1,9 +1,7 @@
 fastapi
 uvicorn
-sqlalchemy
-psycopg2-binary
-pydantic
 slowapi
 httpx
-python-dotenv
+pydantic
 x402
+cdp
