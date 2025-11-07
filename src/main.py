@@ -1,19 +1,14 @@
-"""FastAPI server for Verisage - Multi-LLM Oracle (with external settlement webhook support)."""
+"""FastAPI server for sage402 - Multi-LLM Oracle."""
 
 import asyncio
-import hmac
-import hashlib
-import json
 import logging
-import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any, Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request, Response, Header
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -33,36 +28,81 @@ from src.workers import process_oracle_query
 from src.x402_custom_middleware import require_payment_async_settle
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
-# ------------------------------------------------------------------------------
 # Global health status (updated by background task every minute).
-# ------------------------------------------------------------------------------
 health_status = {"status": "healthy", "last_check": None}
 
-# Optional: HMAC verification for webhook
-FACILITATOR_WEBHOOK_SECRET = os.getenv("FACILITATOR_WEBHOOK_SECRET", "").strip()
-
-# ------------------------------------------------------------------------------
-# Custom CSS for Swagger (unchanged)
-# ------------------------------------------------------------------------------
+# Custom CSS for API docs.
 CUSTOM_SWAGGER_CSS = """
-/* ... (keep your existing CSS exactly as-is) ... */
+body { background: #0a0a0a; }
+.swagger-ui { font-family: 'Inter', sans-serif; }
+.swagger-ui .topbar { background: #111; border-bottom: 1px solid #222; }
+.swagger-ui .topbar .download-url-wrapper { display: none; }
+.swagger-ui .info { background: #111; border-bottom: 1px solid #222; margin: 0; padding: 40px; }
+.swagger-ui .info .title { color: #e4e4e7; font-family: 'Space Grotesk', sans-serif; font-size: 3em; font-weight: 600; letter-spacing: -0.03em; }
+.swagger-ui .info .description p { color: #71717a; font-size: 0.95em; }
+.swagger-ui .scheme-container { background: #111; border: none; padding: 20px 40px; border-bottom: 1px solid #222; }
+.swagger-ui .opblock-tag { border-bottom: 1px solid #222; color: #a1a1aa; background: transparent; }
+.swagger-ui .opblock { background: #111; border: 1px solid #222; border-radius: 0; margin: 0 0 1px 0; }
+.swagger-ui .opblock .opblock-summary { background: transparent; border: none; padding: 20px; }
+.swagger-ui .opblock.opblock-post { border-left: 3px solid #10b981; }
+.swagger-ui .opblock.opblock-get { border-left: 3px solid #10b981; }
+.swagger-ui .opblock .opblock-summary-method { background: #10b981; color: #0a0a0a; border-radius: 0; font-weight: 500; }
+.swagger-ui .opblock .opblock-summary-path { color: #e4e4e7; }
+.swagger-ui .opblock .opblock-summary-description { color: #71717a; }
+.swagger-ui .opblock .opblock-section-header { background: #0a0a0a; border-bottom: 1px solid #222; }
+.swagger-ui .opblock .opblock-section-header h4 { color: #a1a1aa; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; }
+.swagger-ui .opblock-body { background: #0a0a0a; color: #d4d4d8; }
+.swagger-ui .parameters-col_description { color: #71717a; }
+.swagger-ui .parameter__name { color: #e4e4e7; }
+.swagger-ui .parameter__type { color: #10b981; }
+.swagger-ui .response-col_status { color: #10b981; }
+.swagger-ui .response-col_description { color: #71717a; }
+.swagger-ui .btn { border-radius: 0; font-weight: 500; }
+.swagger-ui .btn.execute { background: #e4e4e7; color: #0a0a0a; border: none; }
+.swagger-ui .btn.execute:hover { background: #fafafa; }
+.swagger-ui .btn.cancel { background: transparent; color: #71717a; border: 1px solid #27272a; }
+.swagger-ui .btn.cancel:hover { border-color: #10b981; color: #10b981; }
+.swagger-ui textarea { background: #0a0a0a; border: 1px solid #27272a; color: #e4e4e7; border-radius: 0; }
+.swagger-ui input { background: #0a0a0a; border: 1px solid #27272a; color: #e4e4e7; border-radius: 0; }
+.swagger-ui select { background: #0a0a0a; border: 1px solid #27272a; color: #e4e4e7; border-radius: 0; }
+.swagger-ui .responses-inner { background: #0a0a0a; }
+.swagger-ui .model-box { background: #0a0a0a; border: 1px solid #222; border-radius: 0; }
+.swagger-ui .model { color: #d4d4d8; }
+.swagger-ui .model-title { color: #e4e4e7; }
+.swagger-ui .prop-type { color: #10b981; }
+.swagger-ui .prop-format { color: #71717a; }
+.swagger-ui table thead tr th { color: #a1a1aa; border-bottom: 1px solid #222; }
+.swagger-ui table tbody tr td { color: #d4d4d8; border-bottom: 1px solid #222; }
+.swagger-ui .tab li { color: #71717a; }
+.swagger-ui .tab li.active { color: #e4e4e7; }
+.swagger-ui .markdown p, .swagger-ui .markdown code { color: #d4d4d8; }
 """
 
-# OpenAPI tags (unchanged)
+# OpenAPI tags metadata.
 tags_metadata = [
-    {"name": "Oracle (Paid)", "description": "Submit queries to the multi-LLM oracle. **Requires payment via x402 protocol.**"},
-    {"name": "Oracle", "description": "Check status and retrieve results for oracle queries."},
-    {"name": "Public Feed", "description": "Browse recent fact verifications submitted by the community."},
-    {"name": "System", "description": "Health checks and system status."},
+    {
+        "name": "Oracle (Paid)",
+        "description": "Submit queries to the multi-LLM oracle. **Requires payment via x402 protocol.**",
+    },
+    {
+        "name": "Oracle",
+        "description": "Check status and retrieve results for oracle queries.",
+    },
+    {
+        "name": "Public Feed",
+        "description": "Browse recent fact verifications submitted by the community.",
+    },
+    {
+        "name": "System",
+        "description": "Health checks and system status.",
+    },
 ]
 
-# ------------------------------------------------------------------------------
-# Lifespan / background health updater
-# ------------------------------------------------------------------------------
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    health_task = None
     if settings.debug_payments or settings.debug_mock:
         logger.warning("=" * 80)
         if settings.debug_payments:
@@ -71,22 +111,23 @@ async def lifespan(app: FastAPI):
             logger.warning("WARNING: Running with DEBUG_MOCK=true - USING MOCK LLM CLIENTS!")
         logger.warning("=" * 80)
 
-    task = asyncio.create_task(update_health_status_periodically())
+    # Start background task for health status updates.
+    health_task = asyncio.create_task(update_health_status_periodically())
 
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if health_task:
+            health_task.cancel()
+            try:
+                await health_task
+            except asyncio.CancelledError:
+                pass
 
-# ------------------------------------------------------------------------------
-# FastAPI app
-# ------------------------------------------------------------------------------
+
+# Configure FastAPI application.
 app = FastAPI(
-    title="Verisage",
+    title="sage402",
     description=(
         "Verifiable Multi-LLM Truth Oracle running on Oasis ROFL. "
         "Trustless fact verification powered by multiple independent AI providers (Claude, Gemini, OpenAI). "
@@ -94,27 +135,35 @@ app = FastAPI(
         "Public keys can be verified against on-chain attested state at https://github.com/ptrus/rofl-registry"
     ),
     version="0.1.0",
-    docs_url=None,
+    docs_url=None,  # Disable default docs.
     redoc_url=None,
     openapi_tags=tags_metadata,
-    swagger_ui_parameters={"syntaxHighlight.theme": "nord", "defaultModelsExpandDepth": 1},
+    swagger_ui_parameters={
+        "syntaxHighlight.theme": "nord",
+        "defaultModelsExpandDepth": 1,
+    },
     lifespan=lifespan,
 )
 
-# ------------------------------------------------------------------------------
-# Rate limiting + CORS
-# ------------------------------------------------------------------------------
+
+# Custom key function for rate limiting.
 def get_client_ip(request: Request) -> str:
+    """Get client IP, respecting CloudFlare proxy if configured."""
     if settings.behind_cloudflare:
+        # Trust CF-Connecting-IP header only when behind CloudFlare.
         cf_ip = request.headers.get("CF-Connecting-IP")
         if cf_ip:
             return cf_ip
+    # Fall back to direct connection IP.
     return get_remote_address(request)
 
+
+# Initialize rate limiter.
 limiter = Limiter(key_func=get_client_ip)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Add CORS middleware.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.get_cors_origins(),
@@ -123,49 +172,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------------------------------
-# Background health updater
-# ------------------------------------------------------------------------------
+
+# Background task to update health status every minute.
 async def update_health_status_periodically():
+    """Background task that updates health status every 60 seconds."""
     global health_status
+
     while True:
         try:
             await asyncio.sleep(60)
+
             stats = job_store.get_recent_job_stats(limit=10)
             queued_count = job_store.get_queued_job_count()
 
             status = "healthy"
             status_details = {}
 
+            # Check if queue is overloaded.
             if queued_count > 100:
                 status = "unhealthy"
                 status_details["queue_status"] = "overloaded"
                 status_details["queued_jobs"] = queued_count
             elif stats["total"] > 0:
                 failure_rate = stats["failed"] / stats["total"]
+                # Mark as degraded if >50% of last 10 jobs failed.
                 if failure_rate > 0.5:
                     status = "degraded"
 
             health_status = {
                 "status": status,
                 "last_check": datetime.now(UTC).isoformat(),
-                "recent_jobs": {"total": stats["total"], "failed": stats["failed"]},
+                "recent_jobs": {
+                    "total": stats["total"],
+                    "failed": stats["failed"],
+                },
                 "queued_jobs": queued_count,
                 **status_details,
             }
+
         except Exception as e:
             logger.error(f"Health status update failed: {e}", exc_info=True)
-            health_status = {"status": "unhealthy", "last_check": datetime.now(UTC).isoformat(), "error": str(e)}
+            health_status = {
+                "status": "unhealthy",
+                "last_check": datetime.now(UTC).isoformat(),
+                "error": str(e),
+            }
 
-# ------------------------------------------------------------------------------
-# Static + API router
-# ------------------------------------------------------------------------------
+
+# Mount static files.
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Create API v1 router.
 api_v1 = APIRouter(prefix="/api/v1")
 
-# ------------------------------------------------------------------------------
-# Payment middleware (x402) + settlement callbacks
-# ------------------------------------------------------------------------------
+# Configure x402 payment middleware for POST endpoint (if not in debug mode).
 if not settings.debug_payments:
     if not settings.x402_payment_address:
         raise ValueError(
@@ -173,57 +233,65 @@ if not settings.debug_payments:
             "Set DEBUG_PAYMENTS=true for testing without payments."
         )
 
+    # Create facilitator config for production (required for payment verification infrastructure).
     facilitator_config = None
     if settings.environment == "production":
         if settings.facilitator_url:
+            # Use custom facilitator URL
             from x402.facilitator import FacilitatorConfig
+
             facilitator_config = FacilitatorConfig(url=settings.facilitator_url)
             logger.info(f"✓ Using custom facilitator URL: {settings.facilitator_url}")
         else:
+            # Use Coinbase CDP facilitator
             from cdp.x402 import create_facilitator_config
+
             facilitator_config = create_facilitator_config(
                 api_key_id=settings.cdp_api_key_id,
                 api_key_secret=settings.cdp_api_key_secret,
             )
             logger.info("✓ CDP facilitator configured for production payment verification")
 
+    # Settlement callbacks for async payment processing
     async def on_settlement_success(request: Request, payment, payment_requirements):
-        """Async-settle path (works with CDP and any facilitator that calls back through middleware)."""
-        try:
-            if hasattr(request.state, "job_id") and hasattr(request.state, "query"):
-                job_id = request.state.job_id
-                query = request.state.query
-                logger.info(f"[settlement:middleware] success → queue job {job_id}")
-                process_oracle_query(job_id, query)
-        except Exception as e:
-            logger.error(f"[settlement:middleware] failed to queue job: {e}", exc_info=True)
+        """Handle successful payment settlement - queue the job for processing."""
+        if hasattr(request.state, "job_id") and hasattr(request.state, "query"):
+            job_id = request.state.job_id
+            query = request.state.query
+            logger.info(f"Settlement succeeded - queueing job {job_id} for processing")
 
-    async def on_settlement_failure(request: Request, payment, payment_requirements, error_reason: str):
-        try:
-            if hasattr(request.state, "job_id"):
-                job_id = request.state.job_id
-                job_store.update_job_error(job_id, "Payment settlement failed")
-                logger.warning(f"[settlement:middleware] failed for job {job_id}: {error_reason}")
-        except Exception:
-            logger.warning(f"[settlement:middleware] failure path error (no job_id?) reason={error_reason}")
+            # Enqueue task for background processing
+            process_oracle_query(job_id, query)
 
+    async def on_settlement_failure(
+        request: Request, payment, payment_requirements, error_reason: str
+    ):
+        """Handle failed payment settlement - mark the job as failed."""
+        if hasattr(request.state, "job_id"):
+            job_id = request.state.job_id
+            logger.warning(f"Settlement failed for job {job_id}: {error_reason}")
+
+            # Mark the job as failed with settlement error
+            job_store.update_job_error(job_id, "Payment settlement failed")
+
+    # Wrap payment middleware to skip OPTIONS requests for CORS.
+    # Using custom async-settle middleware to avoid proxy idle timeout issues
     payment_middleware = require_payment_async_settle(
         path="/api/v1/query",
         price=settings.x402_price,
         pay_to_address=settings.x402_payment_address,
         network=settings.x402_network,
-        description=(
-            "Verifiable Multi-LLM Truth Oracle - Trustless fact verification powered by multiple "
-            "independent AI providers (Claude, Gemini, OpenAI). Cryptographically signed responses "
-            "from code running in Oasis ROFL TEE."
+        description="Verifiable Multi-LLM Truth Oracle - Trustless fact verification powered by multiple independent AI providers (Claude, Gemini, OpenAI). Cryptographically signed responses from code running in Oasis ROFL TEE.",
+        paywall_config=PaywallConfig(
+            app_name="sage402",
+            app_logo="/static/logo.png",
         ),
-        paywall_config=PaywallConfig(app_name="Verisage.xyz", app_logo="/static/logo.png"),
         input_schema=HTTPInputSchema(
             body_type="json",
             body_fields={
                 "query": {
                     "type": "string",
-                    "description": "Question to verify (YES/NO). Be specific with dates, names, and facts.",
+                    "description": "Question to verify (should be answerable with YES/NO). Be specific with dates, names, and facts. Example: 'Did the Lakers win against the Warriors on October 22, 2025?'",
                     "minLength": 10,
                     "maxLength": 256,
                     "pattern": r'^[a-zA-Z0-9\s.,?!\-\'"":;()/@#$%&+=]+$',
@@ -240,42 +308,70 @@ if not settings.debug_payments:
 
     @app.middleware("http")
     async def payment_with_cors(request: Request, call_next):
+        """Payment middleware that skips OPTIONS requests for CORS preflight."""
         if request.method == "OPTIONS":
             return await call_next(request)
 
         response = await payment_middleware(request, call_next)
 
-        # Ensure CORS headers on 402 responses (browser fetch)
+        # Ensure CORS headers are on 402 responses.
         if response.status_code == 402:
             origin = request.headers.get("origin")
-            allowed = settings.get_cors_origins()
-            if origin and origin in allowed:
+            allowed_origins = settings.get_cors_origins()
+            if origin and origin in allowed_origins:
                 response.headers["Access-Control-Allow-Origin"] = origin
                 response.headers["Access-Control-Allow-Credentials"] = "true"
                 response.headers["Access-Control-Allow-Methods"] = "*"
                 response.headers["Access-Control-Allow-Headers"] = "*"
+
+        # Note: Job creation now happens asynchronously via settlement callbacks
+        # to avoid blocking the response for proxy idle timeout
+
         return response
 
-# ------------------------------------------------------------------------------
-# Swagger docs route (unchanged)
-# ------------------------------------------------------------------------------
+
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
+    """Serve custom styled API documentation."""
     html = get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=app.title + " - API Documentation",
         swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
         swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
     )
-    html_str = html.body.decode().replace("</head>", f"<style>{CUSTOM_SWAGGER_CSS}</style></head>")
+
+    # Inject custom CSS into the HTML.
+    html_str = html.body.decode()
+    html_str = html_str.replace("</head>", f"<style>{CUSTOM_SWAGGER_CSS}</style></head>")
+
     return HTMLResponse(content=html_str)
 
-# ------------------------------------------------------------------------------
-# Oracle endpoints
-# ------------------------------------------------------------------------------
+
 @api_v1.post("/query", response_model=JobResponse, tags=["Oracle (Paid)"])
 @limiter.limit("100/minute")
 async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
+    """Submit a query to the oracle for processing.
+
+    This endpoint requires payment via the x402 protocol.
+
+    Rate limit: 100 requests per minute per IP.
+
+    **IMPORTANT:** Check the `/health` endpoint before submitting jobs. If the service
+    is overloaded (status: "unhealthy"), your payment will be accepted but the job
+    will be rejected with HTTP 503. Wait until status returns to "healthy" or "degraded"
+    before submitting.
+
+    Args:
+        query: The question to verify
+        request: FastAPI request object (for payment info)
+
+    Returns:
+        JobResponse with job_id for polling
+
+    Raises:
+        HTTPException: If service is overloaded (queue full)
+    """
+    # Check if service is overloaded before accepting new jobs.
     if health_status.get("status") == "unhealthy":
         raise HTTPException(
             status_code=503,
@@ -287,11 +383,13 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
             },
         )
 
+    # Extract payment info if available (from x402 middleware).
     payer_address = None
     tx_hash = None
     network = None
 
     try:
+        # Extract payment info from x402 middleware
         if hasattr(request.state, "verify_response"):
             verify_resp = request.state.verify_response
             if hasattr(verify_resp, "payer"):
@@ -301,10 +399,15 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
             payment_details = request.state.payment_details
             if hasattr(payment_details, "network"):
                 network = payment_details.network
+
+        # Note: tx_hash is not available from x402 verify response
+        # It would only be available in SettleResponse which happens after settlement
     except Exception as e:
+        # If payment info extraction fails, continue without it.
         logger.warning(f"Failed to extract payment info: {e}", exc_info=True)
 
-    # Create job now (settlement may happen later via middleware or webhook)
+    # Create job immediately after payment verification.
+    # Settlement will happen asynchronously in the background.
     job_id, created_at = job_store.create_job(
         query.query,
         payer_address=payer_address,
@@ -312,23 +415,47 @@ async def query_oracle(query: OracleQuery, request: Request) -> JobResponse:
         network=network,
     )
 
-    # Stash so the async-settle callback can queue the job
+    # Store job_id and query in request state so settlement callbacks can access them.
     request.state.job_id = job_id
     request.state.query = query.query
 
-    # In debug mode, process immediately
+    # In debug mode, queue job immediately since there's no settlement to wait for.
     if settings.debug_payments:
         process_oracle_query(job_id, query.query)
 
-    return JobResponse(job_id=job_id, status=JobStatus.PENDING, query=query.query, created_at=created_at)
+    return JobResponse(
+        job_id=job_id,
+        status=JobStatus.PENDING,
+        query=query.query,
+        created_at=created_at,
+    )
+
 
 @api_v1.get("/query/{job_id}", response_model=JobResultResponse, tags=["Oracle"])
 @limiter.limit("100/minute")
 async def get_query_result(job_id: str, request: Request) -> JobResultResponse:
+    """Get the status and result of a query job.
+
+    Completed results include cryptographic signatures generated inside the ROFL TEE using a
+    SECP256K1 key. The signature and public_key fields can be used to verify the response
+    authenticity. The public key can be verified against the on-chain attested state in the
+    Oasis ROFL registry: https://github.com/ptrus/rofl-registry
+
+    Args:
+        job_id: The job identifier
+
+    Returns:
+        JobResultResponse with status and result if completed (including signature and public_key)
+
+    Raises:
+        HTTPException: If job not found
+    """
     job_data = job_store.get_job(job_id)
+
     if job_data is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    # Parse result if completed.
     result = None
     if job_data["result_json"]:
         result = OracleResult.model_validate_json(job_data["result_json"])
@@ -340,16 +467,33 @@ async def get_query_result(job_id: str, request: Request) -> JobResultResponse:
         result=result,
         error=job_data["error"],
         created_at=datetime.fromisoformat(job_data["created_at"]),
-        completed_at=(datetime.fromisoformat(job_data["completed_at"]) if job_data["completed_at"] else None),
+        completed_at=(
+            datetime.fromisoformat(job_data["completed_at"]) if job_data["completed_at"] else None
+        ),
         payer_address=job_data.get("payer_address"),
         tx_hash=job_data.get("tx_hash"),
         network=job_data.get("network"),
     )
 
+
 @api_v1.get("/recent", tags=["Public Feed"])
 @limiter.limit("100/minute")
 async def get_recent_jobs(request: Request, limit: int = 5, exclude_uncertain: bool = True):
+    """Get recently completed jobs (public feed).
+
+    Results include cryptographic signatures generated inside the ROFL TEE. The public key
+    can be verified against the on-chain attested state to prove response authenticity.
+
+    Args:
+        limit: Maximum number of jobs to return (default: 5, max: 20)
+        exclude_uncertain: Exclude jobs with uncertain results (default: True)
+
+    Returns:
+        List of recent completed jobs with results (including signatures and public keys)
+    """
+    # Limit to max 20 to prevent abuse.
     limit = min(limit, 20)
+
     jobs_data = job_store.get_recent_completed_jobs(limit, exclude_uncertain)
 
     jobs = []
@@ -366,117 +510,48 @@ async def get_recent_jobs(request: Request, limit: int = 5, exclude_uncertain: b
                 result=result,
                 error=job_data["error"],
                 created_at=datetime.fromisoformat(job_data["created_at"]),
-                completed_at=(datetime.fromisoformat(job_data["completed_at"]) if job_data["completed_at"] else None),
+                completed_at=(
+                    datetime.fromisoformat(job_data["completed_at"])
+                    if job_data["completed_at"]
+                    else None
+                ),
                 payer_address=job_data.get("payer_address"),
                 tx_hash=job_data.get("tx_hash"),
                 network=job_data.get("network"),
             )
         )
+
     return jobs
 
-# ------------------------------------------------------------------------------
-# External settlement webhook (Daydreams / x402.rs friendly)
-# ------------------------------------------------------------------------------
-@api_v1.post("/settle", tags=["Oracle"])
-async def settlement_webhook(
-    request: Request,
-    x_facilitator_signature: Optional[str] = Header(default=None, alias="X-Facilitator-Signature"),
-):
-    """
-    Generic settlement webhook for facilitators that POST back out-of-band.
-    We attempt to verify (optional HMAC) and extract a job_id from multiple common shapes:
 
-    - payload["job_id"]
-    - payload["metadata"]["job_id"]
-    - payload["payment"]["metadata"]["job_id"]
-    - payload["request"]["headers"]["x-job-id"]
-    - payload["settlement"]["job_id"]
+# Include v1 API router.
+app.include_router(api_v1)
 
-    Then we queue the corresponding job.
-    """
-    raw = await request.body()
-    body_text = raw.decode("utf-8", errors="ignore") if raw else "{}"
 
-    # Optional HMAC verification if secret provided and header present
-    if FACILITATOR_WEBHOOK_SECRET and x_facilitator_signature:
-        try:
-            # Accept formats "sha256=<hex>" or plain hex
-            supplied = x_facilitator_signature.split("=", 1)[-1].strip()
-            digest = hmac.new(
-                FACILITATOR_WEBHOOK_SECRET.encode("utf-8"),
-                raw,
-                hashlib.sha256,
-            ).hexdigest()
-            if not hmac.compare_digest(digest, supplied):
-                logger.warning("[settlement:webhook] HMAC mismatch")
-                return JSONResponse({"status": "error", "message": "invalid signature"}, status_code=401)
-        except Exception as e:
-            logger.warning(f"[settlement:webhook] HMAC verification error: {e}")
-            return JSONResponse({"status": "error", "message": "signature error"}, status_code=401)
-
-    try:
-        payload: Any = json.loads(body_text or "{}")
-    except Exception:
-        payload = {}
-
-    logger.info(f"[settlement:webhook] received payload: {json.dumps(payload)[:2000]}")
-
-    # Extract a job_id from common locations
-    job_id = (
-        payload.get("job_id")
-        or (payload.get("metadata") or {}).get("job_id")
-        or ((payload.get("payment") or {}).get("metadata") or {}).get("job_id")
-        or ((payload.get("request") or {}).get("headers") or {}).get("x-job-id")
-        or ((payload.get("settlement") or {}).get("job_id"))
-    )
-
-    if not job_id:
-        logger.warning("[settlement:webhook] no job_id found in payload")
-        return JSONResponse({"status": "error", "message": "job_id missing"}, status_code=400)
-
-    # Confirm the job exists
-    job = job_store.get_job(job_id)
-    if not job:
-        logger.warning(f"[settlement:webhook] job not found: {job_id}")
-        return JSONResponse({"status": "error", "message": "job not found"}, status_code=404)
-
-    # If already finished, acknowledge idempotently
-    if job["status"] in (JobStatus.COMPLETED.value, JobStatus.FAILED.value):
-        logger.info(f"[settlement:webhook] job {job_id} already finalized, ack")
-        return JSONResponse({"status": "ok", "message": "already finalized"})
-
-    # Queue processing
-    try:
-        logger.info(f"[settlement:webhook] success → queue job {job_id}")
-        process_oracle_query(job_id, job["query"])
-        return JSONResponse({"status": "ok"})
-    except Exception as e:
-        logger.error(f"[settlement:webhook] failed to queue job {job_id}: {e}", exc_info=True)
-        return JSONResponse({"status": "error", "message": "queue failed"}, status_code=500)
-
-# ------------------------------------------------------------------------------
-# System endpoints
-# ------------------------------------------------------------------------------
-@api_v1.get("/health", tags=["System"])
+@app.get("/health", tags=["System"])
 @limiter.limit("100/minute")
 async def health_check(request: Request):
+    """Health check endpoint (updated every minute by worker)."""
     return health_status
 
-@api_v1.get("/info", tags=["System"])
+
+@app.get("/info", tags=["System"])
 @limiter.limit("100/minute")
 async def get_info(request: Request):
+    """Get service information including payment address and network."""
     return {
         "payment_address": settings.x402_payment_address,
         "network": settings.x402_network,
         "price": settings.x402_price,
     }
 
-# Mount router last
-app.include_router(api_v1)
 
-# ------------------------------------------------------------------------------
-# Dev entrypoint
-# ------------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)
+
+    uvicorn.run(
+        "src.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+    )
