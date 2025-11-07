@@ -7,34 +7,6 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-
-ALLOWED_ORIGINS = [
-    "https://loyal-courtesy-production-617e.up.railway.app",
-    "https://402sage-production.up.railway.app",
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=[
-        "content-type",
-        "x-402-pricing",
-        "x-402-payment-method",
-        "x-402-invoice",
-        "x-402-signature",
-        "x-402-payment-pointer",
-        "x-402-settlement-token",
-    ],
-    expose_headers=[
-        "x-402-pricing",
-        "x-402-invoice",
-        "x-402-signature",
-        "x-402-payment-method",
-        "x-402-settlement-token",
-    ],
-)
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -171,6 +143,34 @@ app = FastAPI(
         "defaultModelsExpandDepth": 1,
     },
     lifespan=lifespan,
+)
+
+ALLOWED_ORIGINS = [
+    "https://loyal-courtesy-production-617e.up.railway.app",
+    "https://402sage-production.up.railway.app",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=[
+        "content-type",
+        "x-402-pricing",
+        "x-402-payment-method",
+        "x-402-invoice",
+        "x-402-signature",
+        "x-402-payment-pointer",
+        "x-402-settlement-token",
+    ],
+    expose_headers=[
+        "x-402-pricing",
+        "x-402-invoice",
+        "x-402-signature",
+        "x-402-payment-method",
+        "x-402-settlement-token",
+    ],
 )
 
 
