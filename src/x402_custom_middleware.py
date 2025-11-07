@@ -174,7 +174,7 @@ def require_payment_async_settle(
 
         # More generous timeouts (connect/read/write/pool). Enable HTTP/2 for better latency.
         timeout = httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=60.0)
-        async with httpx.AsyncClient(timeout=timeout, http2=True) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             return await settle_with_retry(client, payment, payment_requirements, headers)
 
     async def settle_in_background(request: Request, payment: PaymentPayload, payment_requirements: PaymentRequirements) -> None:
